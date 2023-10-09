@@ -1,0 +1,10 @@
+{
+    "nrf-connect.toolchain.path": "${nrf-connect.toolchain:2.4.2}",
+    "files.associations": {
+        "*.njk": "html",
+        "*.html": "html",
+        "byteorder.h": "c",
+        "errno.h": "c",
+        "hids.h": "c"
+    }
+}
