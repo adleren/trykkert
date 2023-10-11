@@ -1,85 +1,42 @@
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
 #include <zephyr/bluetooth/bluetooth.h>
-#include <zephyr/bluetooth/hci.h>
-#include <zephyr/bluetooth/conn.h>
-#include <zephyr/bluetooth/uuid.h>
-#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/settings/settings.h>
-#include <zephyr/sys/byteorder.h>
-
-#include <errno.h>
-#include <stddef.h>
-#include <string.h>
 
 #include "hog.h"
+#include "gpio.h"
 
 #include <zephyr/logging/log.h>
 #define LOG_MODULE_NAME app
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 
-static const struct bt_data ad[] = {
-    BT_DATA_BYTES(BT_DATA_FLAGS,
-        (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)
-    ),
-    BT_DATA_BYTES(BT_DATA_UUID16_ALL,
-        BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL),
-        BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)),
-};
-
-static void connected(struct bt_conn *conn, uint8_t err)
+static void button_handler(uint8_t button_mask)
 {
-    char addr[BT_ADDR_LE_STR_LEN];
+    LOG_INF("Btn state: %x\n", button_mask);
+}
 
-    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
+int main(void)
+{
+    int err;
+
+    k_sleep(K_MSEC(3000)); // boot cooldown
+
+    LOG_INF("Starting Bluetooth Peripheral HIDS keyboard example\n");
+
+    err = gpio_init(button_handler);
     if (err) {
-        LOG_ERR("Failed to connect to %s (%u)\n", addr, err);
-        return;
+        LOG_ERR("Failed to initialize GPIO (err: %d)\n", err);
     }
 
-    LOG_INF("Connected %s\n", addr);
+    hid_init();
 
-    int ret = bt_conn_set_security(conn, BT_SECURITY_L2); 
-    if (ret) {
-        LOG_ERR("Failed to set security (err: %d)\n", ret);
-    }
-}
-
-static void disconnected(struct bt_conn *conn, uint8_t reason)
-{
-    char addr[BT_ADDR_LE_STR_LEN];
-
-    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-    LOG_INF("Disconnected from %s (reason 0x%02x)\n", addr, reason);
-}
-
-static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
-{
-    char addr[BT_ADDR_LE_STR_LEN];
-
-    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-    if (!err) {
-        LOG_INF("Security changed: %s level %u\n", addr, level);
-    } else {
-        LOG_ERR("Security failed: %s level %u err %d\n", addr, level, err);
-    }
-}
-
-BT_CONN_CB_DEFINE(conn_callbacks) = {
-    .connected = connected,
-    .disconnected = disconnected,
-    .security_changed = security_changed,
-};
-
-static void bt_ready(int err)
-{
+    err = bt_enable(NULL);
     if (err) {
         LOG_ERR("Bluetooth init failed (err %d)\n", err);
-        return;
+        return 0;
     }
 
     LOG_INF("Bluetooth initialized\n");
@@ -91,30 +48,19 @@ static void bt_ready(int err)
     // ! uncomment to fix trouble
     bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
 
-    hog_init();
+    advertising_start();
 
-    err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
-    if (err) {
-        LOG_ERR("Advertising failed to start (err %d)\n", err);
-        return;
+    for (;;) {
+        // if (is_advertising()) {
+        //     dk_set_led(ADV_STATUS_LED, (++blink_status) % 2);
+        // } else {
+        //     dk_set_led_off(ADV_STATUS_LED);
+        // }
+        // k_sleep(K_MSEC(ADV_LED_BLINK_INTERVAL));
+
+        /* Battery level simulation */
+        bas_notify();
+
+        k_sleep(K_MSEC(1000)); // placeholder
     }
-
-    LOG_INF("Advertising successfully started\n");
-}
-
-
-int main(void)
-{
-    int err;
-
-    k_sleep(K_MSEC( 1000 )); // startup cooldown to allow logging
-
-    err = bt_enable(bt_ready);
-    if (err) {
-        LOG_ERR("Bluetooth init failed (err %d)\n", err);
-        return 0;
-    }
-
-    hog_button_loop();
-    return 0;
 }

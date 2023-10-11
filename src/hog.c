@@ -1,237 +1,553 @@
+#include "hog.h"
+
 #include <zephyr/kernel.h>
-#include <zephyr/types.h>
+#include <zephyr/spinlock.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/sys/byteorder.h>
+#include <zephyr/bluetooth/services/bas.h>
+#include <zephyr/bluetooth/services/dis.h>
+#include <bluetooth/services/hids.h>
 
-#include <errno.h>
+#include <soc.h>
 #include <stddef.h>
 #include <string.h>
-
-#include "hog.h"
+#include <errno.h>
 
 #include <zephyr/logging/log.h>
 #define LOG_MODULE_NAME hog
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 
-enum {
-    HIDS_REMOTE_WAKE = BIT(0),
-    HIDS_NORMALLY_CONNECTABLE = BIT(1),
-};
-
-struct hids_info {
-    uint16_t version; /* version number of base USB HID Specification */
-    uint8_t code; /* country HID Device hardware is localized for. */
-    uint8_t flags;
-} __packed;
-
-struct hids_report {
-    uint8_t id; /* report id */
-    uint8_t type; /* report type */
-} __packed;
-
-static struct hids_info info = {
-    .version = 0x0000,
-    .code = 0x00,
-    .flags = HIDS_NORMALLY_CONNECTABLE,
-};
-
-enum {
-    HIDS_INPUT = 0x01,
-    HIDS_OUTPUT = 0x02,
-    HIDS_FEATURE = 0x03,
-};
-
-static struct hids_report input = {
-    .id = 0x01,
-    .type = HIDS_INPUT,
-};
-
-static uint8_t simulate_input;
-static uint8_t ctrl_point;
-static uint8_t report_map[] = {
-    0x05, 0x01, // Usage Page (Generic Desktop)
-    0x09, 0x06, // Usage (Keyboard)
-    0xA1, 0x01, // Collection (Application)
-    0x05, 0x07, //     Usage Page (Key Codes)
-    0x19, 0xe0, //     Usage Minimum (224)
-    0x29, 0xe7, //     Usage Maximum (231)
-    0x15, 0x00, //     Logical Minimum (0)
-    0x25, 0x01, //     Logical Maximum (1)
-    0x75, 0x01, //     Report Size (1)
-    0x95, 0x08, //     Report Count (8)
-    0x81, 0x02, //     Input (Data, Variable, Absolute)
-
-    0x75, 0x08, //     Report Size (8)
-    0x95, 0x01, //     Report Count (1)
-    0x81, 0x01, //     Input (Constant) reserved byte(1)
-
-    0x75, 0x01, //     Report Size (1)
-    0x95, 0x05, //     Report Count (5)
-    0x05, 0x08, //     Usage Page (Page# for LEDs)
-    0x19, 0x01, //     Usage Minimum (1)
-    0x29, 0x05, //     Usage Maximum (5)
-    0x91, 0x02, //     Output (Data, Variable, Absolute), Led report
-    0x75, 0x03, //     Report Size (3)
-    0x95, 0x01, //     Report Count (1)
-    0x91, 0x01, //     Output (Data, Variable, Absolute), Led report padding
-
-    0x75, 0x08, //     Report Size (8)
-    0x95, 0x06, //     Report Count (6) - up to 6 simultaneous key codes (more than 1 optional)
-    0x15, 0x00, //     Logical Minimum (0)
-    0x25, 0x65, //     Logical Maximum (101)
-    0x05, 0x07, //     Usage Page (Key codes)
-    0x19, 0x00, //     Usage Minimum (0)
-    0x29, 0x65, //     Usage Maximum (101)
-    0x81, 0x00, //     Input (Data, Array) Key array(6 bytes)
-
-    0x09, 0x05,       //     Usage (Vendor Defined)
-    0x15, 0x00,       //     Logical Minimum (0)
-    0x26, 0xFF, 0x00, //     Logical Maximum (255)
-    0x95, 0x02,       //     Report Size (8)
-    0x75, 0x08,       //     Report Count (2)
-    0xB1, 0x02,       //     Feature (Data, Variable, Absolute)
-
-    0xC0        // End Collection (Application)
-};
-
-static ssize_t read_info(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
-{
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, attr->user_data, sizeof(struct hids_info));
-}
-
-static ssize_t read_report_map(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
-{
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, report_map, sizeof(report_map));
-}
-
-static ssize_t read_report(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
-{
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, attr->user_data, sizeof(struct hids_report));
-}
-
-static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
-{
-    simulate_input = (value == BT_GATT_CCC_NOTIFY) ? 1 : 0;
-}
-
-static ssize_t read_input_report(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
-{
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, NULL, 0);
-}
-
-static ssize_t write_ctrl_point(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
-{
-    uint8_t *value = attr->user_data;
-
-    if (offset + len > sizeof(ctrl_point)) {
-        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-    }
-
-    memcpy(value + offset, buf, len);
-
-    return len;
-}
-
-/* HID Service Declaration */
-BT_GATT_SERVICE_DEFINE(hog_svc,
-    BT_GATT_PRIMARY_SERVICE(BT_UUID_HIDS),
-    BT_GATT_CHARACTERISTIC(
-        BT_UUID_HIDS_INFO,
-        BT_GATT_CHRC_READ,
-        BT_GATT_PERM_READ,
-        read_info, NULL, &info
-    ),
-    BT_GATT_CHARACTERISTIC(
-        BT_UUID_HIDS_REPORT_MAP,
-        BT_GATT_CHRC_READ,
-        BT_GATT_PERM_READ,
-        read_report_map, NULL, NULL
-    ),
-    BT_GATT_CHARACTERISTIC(
-        BT_UUID_HIDS_REPORT,
-        (BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY),
-        BT_GATT_PERM_READ_ENCRYPT,
-        read_input_report, NULL, NULL
-    ),
-    BT_GATT_CCC(
-        input_ccc_changed,
-        (BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT)
-    ),
-    BT_GATT_DESCRIPTOR(
-        BT_UUID_HIDS_REPORT_REF,
-        BT_GATT_PERM_READ,
-        read_report, NULL, &input
-    ),
-    BT_GATT_CHARACTERISTIC(
-        BT_UUID_HIDS_CTRL_POINT,
-        BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-        BT_GATT_PERM_WRITE,
-        NULL, write_ctrl_point, &ctrl_point
-    ),
-    // BT_GATT_CHARACTERISTIC(
-    //     BT_UUID_HIDS_BOOT_KB_IN_REPORT,
-    //     (BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY),
-    //     BT_GATT_PERM_READ_ENCRYPT,
-    //     NULL, NULL, NULL
-    // ),
-    // BT_GATT_CHARACTERISTIC(
-    //     BT_UUID_HIDS_BOOT_KB_OUT_REPORT,
-    //     (BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP),
-    //     (BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-    //     NULL, NULL, NULL
-    // ),
+/* HIDS instance. */
+BT_HIDS_DEF(
+    hids_obj,
+    OUTPUT_REPORT_MAX_LEN,
+    INPUT_REPORT_KEYS_MAX_LEN
 );
 
+static volatile bool is_adv;
 
-#define SW0_NODE DT_ALIAS(sw0)
-static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
+static const struct bt_data ad[] = {
+    BT_DATA_BYTES(
+        BT_DATA_GAP_APPEARANCE,
+        (CONFIG_BT_DEVICE_APPEARANCE >> 0) & 0xff,
+        (CONFIG_BT_DEVICE_APPEARANCE >> 8) & 0xff
+    ),
+    BT_DATA_BYTES(
+        BT_DATA_FLAGS,
+        (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)
+    ),
+    BT_DATA_BYTES(
+        BT_DATA_UUID16_ALL,
+        BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL),
+        BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)
+    ),
+};
 
-#define SW1_NODE DT_ALIAS(sw1)
-static const struct gpio_dt_spec sw1 = GPIO_DT_SPEC_GET(SW1_NODE, gpios);
+static const struct bt_data sd[] = {
+    BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+};
 
-void hog_init(void)
+static struct conn_mode {
+    struct bt_conn *conn;
+    bool in_boot_mode;
+} conn_mode;
+
+/* Current report status */
+static struct keyboard_state {
+    uint8_t ctrl_keys_state;
+    uint8_t keys_state[KEY_PRESS_MAX];
+} hid_keyboard_state;
+
+
+void advertising_start(void)
 {
-    gpio_pin_configure_dt(&sw0, GPIO_INPUT);
-    gpio_pin_configure_dt(&sw1, GPIO_INPUT);
+    int err;
+    struct bt_le_adv_param *adv_param = BT_LE_ADV_PARAM(
+        (BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_ONE_TIME),
+        BT_GAP_ADV_FAST_INT_MIN_2,
+        BT_GAP_ADV_FAST_INT_MAX_2,
+        NULL
+    );
+
+    err = bt_le_adv_start(adv_param, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+    if (err) {
+        if (err == -EALREADY) {
+            LOG_WRN("Advertising continued\n");
+        } else {
+            LOG_ERR("Advertising failed to start (err %d)\n", err);
+        }
+        return;
+    }
+    is_adv = true;
+    LOG_INF("Advertising successfully started\n");
 }
 
-#define KEY_A     0x04 // Keyboard a and A
-#define KEY_B     0x05 // Keyboard b and B
-#define KEY_RIGHT 0x4f // Keyboard Right Arrow
-#define KEY_LEFT  0x50 // Keyboard Left Arrow
-#define KEY_DOWN  0x51 // Keyboard Down Arrow
-#define KEY_UP    0x52 // Keyboard Up Arrow
 
-void hog_button_loop(void)
+bool is_advertising(void)
 {
-    for (;;) {
-        if (simulate_input) {
-            /* HID Report:
-             * 0x0: modifier key codes (1 byte)
-             * 0x1: reserved (1 byte)
-             * 0x2: LEDs (1 byte)
-             * 0x3: key codes (6 bytes)
-             * 0xA: vendor (2 bytes)
-             */
-            int8_t report[10] = { 0 };
+    return is_adv;
+}
 
-            if (gpio_pin_get_dt(&sw0)) {
-                // report[3] = KEY_DOWN;
-                report[3] = KEY_A;
-            }
-            if (gpio_pin_get_dt(&sw1)) {
-                // report[3] = KEY_UP;
-                report[3] = KEY_B;
-            }
 
-            bt_gatt_notify(NULL, &hog_svc.attrs[5], &report, sizeof(report));
-        }
-        k_sleep(K_MSEC(100));
+static void connected(struct bt_conn *conn, uint8_t err)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    if (err) {
+        LOG_ERR("Failed to connect to %s (%u)\n", addr, err);
+        return;
     }
+
+    LOG_INF("Connected %s\n", addr);
+
+    err = bt_hids_connected(&hids_obj, conn);
+
+    if (err) {
+        LOG_ERR("Failed to notify HID service about connection\n");
+        return;
+    }
+
+    if (!conn_mode.conn) {
+        conn_mode.conn = conn;
+        conn_mode.in_boot_mode = false;
+    }
+
+    if (!conn_mode.conn) {
+        advertising_start();
+        return;
+    }
+
+    is_adv = false;
+}
+
+
+static void disconnected(struct bt_conn *conn, uint8_t reason)
+{
+    int err;
+    bool is_any_dev_connected = false;
+
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    LOG_INF("Disconnected from %s (reason %u)\n", addr, reason);
+
+    err = bt_hids_disconnected(&hids_obj, conn);
+    if (err) {
+        LOG_ERR("Failed to notify HID service about disconnection\n");
+    }
+
+    if (conn_mode.conn == conn) {
+        conn_mode.conn = NULL;
+    } else {
+        if (conn_mode.conn) {
+            is_any_dev_connected = true;
+        }
+    }
+
+    if (!is_any_dev_connected) {
+        // dk_set_led_off(CON_STATUS_LED);
+    }
+
+    advertising_start();
+}
+
+
+static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    if (!err) {
+        LOG_INF("Security changed: %s level %u\n", addr, level);
+    } else {
+        LOG_ERR("Security failed: %s level %u err %d\n", addr, level, err);
+    }
+}
+
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+    .connected = connected,
+    .disconnected = disconnected,
+    .security_changed = security_changed,
+};
+
+
+// static void caps_lock_handler(const struct bt_hids_rep *rep)
+// {
+//     uint8_t report_val = ((*rep->data) & OUTPUT_REPORT_BIT_MASK_CAPS_LOCK) ? 1 : 0;
+//     dk_set_led(LED_CAPS_LOCK, report_val);
+// }
+
+
+static void hids_outp_rep_handler(struct bt_hids_rep *rep, struct bt_conn *conn, bool write)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    if (!write) {
+        LOG_INF("Output report read\n");
+        return;
+    };
+
+    LOG_INF("Output report has been received %s\n", addr);
+    // caps_lock_handler(rep);
+}
+
+
+static void hids_boot_kb_outp_rep_handler(struct bt_hids_rep *rep, struct bt_conn *conn, bool write)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    if (!write) {
+        LOG_INF("Output report read\n");
+        return;
+    };
+
+    LOG_INF("Boot Keyboard Output report has been received %s\n", addr);
+    // caps_lock_handler(rep);
+}
+
+
+static void hids_pm_evt_handler(enum bt_hids_pm_evt evt, struct bt_conn *conn)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    switch (evt) {
+    case BT_HIDS_PM_EVT_BOOT_MODE_ENTERED:
+        LOG_INF("Boot mode entered %s\n", addr);
+        conn_mode.in_boot_mode = true;
+        break;
+
+    case BT_HIDS_PM_EVT_REPORT_MODE_ENTERED:
+        LOG_INF("Report mode entered %s\n", addr);
+        conn_mode.in_boot_mode = false;
+        break;
+
+    default:
+        break;
+    }
+}
+
+
+void hid_init(void)
+{
+    int err;
+    struct bt_hids_init_param    hids_init_obj = { 0 };
+    struct bt_hids_inp_rep       *hids_inp_rep;
+    struct bt_hids_outp_feat_rep *hids_outp_rep;
+
+    static const uint8_t report_map[] = {
+        0x05, 0x01,       /* Usage Page (Generic Desktop) */
+        0x09, 0x06,       /* Usage (Keyboard) */
+        0xa1, 0x01,       /* Collection (Application) */
+
+        /* Keys */
+#if INPUT_REP_KEYS_REF_ID
+        0x85, INPUT_REP_KEYS_REF_ID,
+#endif
+        0x05, 0x07,       /* Usage Page (Key Codes) */
+        0x19, 0xe0,       /* Usage Minimum (224) */
+        0x29, 0xe7,       /* Usage Maximum (231) */
+        0x15, 0x00,       /* Logical Minimum (0) */
+        0x25, 0x01,       /* Logical Maximum (1) */
+        0x75, 0x01,       /* Report Size (1) */
+        0x95, 0x08,       /* Report Count (8) */
+        0x81, 0x02,       /* Input (Data, Variable, Absolute) */
+
+        0x95, 0x01,       /* Report Count (1) */
+        0x75, 0x08,       /* Report Size (8) */
+        0x81, 0x01,       /* Input (Constant) reserved byte(1) */
+
+        0x95, 0x06,       /* Report Count (6) */
+        0x75, 0x08,       /* Report Size (8) */
+        0x15, 0x00,       /* Logical Minimum (0) */
+        0x25, 0x65,       /* Logical Maximum (101) */
+        0x05, 0x07,       /* Usage Page (Key codes) */
+        0x19, 0x00,       /* Usage Minimum (0) */
+        0x29, 0x65,       /* Usage Maximum (101) */
+        0x81, 0x00,       /* Input (Data, Array) Key array(6 bytes) */
+
+        /* LED */
+#if OUTPUT_REP_KEYS_REF_ID
+        0x85, OUTPUT_REP_KEYS_REF_ID,
+#endif
+        0x95, 0x05,       /* Report Count (5) */
+        0x75, 0x01,       /* Report Size (1) */
+        0x05, 0x08,       /* Usage Page (Page# for LEDs) */
+        0x19, 0x01,       /* Usage Minimum (1) */
+        0x29, 0x05,       /* Usage Maximum (5) */
+        0x91, 0x02,       /* Output (Data, Variable, Absolute), */
+        0x95, 0x01,       /* Report Count (1) */
+        0x75, 0x03,       /* Report Size (3) */
+        0x91, 0x01,       /* Output (Data, Variable, Absolute), */
+
+        0xC0              /* End Collection (Application) */
+    };
+
+    hids_init_obj.rep_map.data = report_map;
+    hids_init_obj.rep_map.size = sizeof(report_map);
+
+    hids_init_obj.info.bcd_hid = BASE_USB_HID_SPEC_VERSION;
+    hids_init_obj.info.b_country_code = 0x00;
+    hids_init_obj.info.flags = (BT_HIDS_REMOTE_WAKE | BT_HIDS_NORMALLY_CONNECTABLE);
+
+    hids_inp_rep = &hids_init_obj.inp_rep_group_init.reports[INPUT_REP_KEYS_IDX];
+    hids_inp_rep->size = INPUT_REPORT_KEYS_MAX_LEN;
+    hids_inp_rep->id = INPUT_REP_KEYS_REF_ID;
+    hids_init_obj.inp_rep_group_init.cnt++;
+
+    hids_outp_rep = &hids_init_obj.outp_rep_group_init.reports[OUTPUT_REP_KEYS_IDX];
+    hids_outp_rep->size = OUTPUT_REPORT_MAX_LEN;
+    hids_outp_rep->id = OUTPUT_REP_KEYS_REF_ID;
+    hids_outp_rep->handler = hids_outp_rep_handler;
+    hids_init_obj.outp_rep_group_init.cnt++;
+
+    hids_init_obj.is_kb = true;
+    hids_init_obj.boot_kb_outp_rep_handler = hids_boot_kb_outp_rep_handler;
+    hids_init_obj.pm_evt_handler = hids_pm_evt_handler;
+
+    err = bt_hids_init(&hids_obj, &hids_init_obj);
+    __ASSERT(err == 0, "HIDS initialization failed\n");
+}
+
+
+/** @brief Function process keyboard state and sends it
+ *
+ *  @param pstate     The state to be sent
+ *  @param boot_mode  Information if boot mode protocol is selected.
+ *  @param conn       Connection handler
+ *
+ *  @return 0 on success or negative error code.
+ */
+static int key_report_con_send(const struct keyboard_state *state, bool boot_mode, struct bt_conn *conn)
+{
+    int err = 0;
+    uint8_t  data[INPUT_REPORT_KEYS_MAX_LEN];
+    uint8_t *key_data;
+    const uint8_t *key_state;
+    size_t n;
+
+    data[0] = state->ctrl_keys_state;
+    data[1] = 0;
+    key_data = &data[2];
+    key_state = state->keys_state;
+
+    for (n = 0; n < KEY_PRESS_MAX; ++n) {
+        *key_data++ = *key_state++;
+    }
+    if (boot_mode) {
+        err = bt_hids_boot_kb_inp_rep_send(&hids_obj, conn, data, sizeof(data), NULL);
+    } else {
+        err = bt_hids_inp_rep_send(&hids_obj, conn, INPUT_REP_KEYS_IDX, data, sizeof(data), NULL);
+    }
+    return err;
+}
+
+/** @brief Function process and send keyboard state to all active connections
+ *
+ * Function process global keyboard state and send it to all connected
+ * clients.
+ *
+ * @return 0 on success or negative error code.
+ */
+static int key_report_send(void)
+{
+    if (conn_mode.conn) {
+        int err;
+
+        err = key_report_con_send(&hid_keyboard_state, conn_mode.in_boot_mode, conn_mode.conn);
+        if (err) {
+            LOG_ERR("Key report send error: %d\n", err);
+            return err;
+        }
+    }
+    return 0;
+}
+
+/** @brief Change key code to ctrl code mask
+ *
+ *  Function changes the key code to the mask in the control code
+ *  field inside the raport.
+ *  Returns 0 if key code is not a control key.
+ *
+ *  @param key Key code
+ *
+ *  @return Mask of the control key or 0.
+ */
+static uint8_t button_ctrl_code(uint8_t key)
+{
+    if (KEY_CTRL_CODE_MIN <= key && key <= KEY_CTRL_CODE_MAX) {
+        return (uint8_t)(1U << (key - KEY_CTRL_CODE_MIN));
+    }
+    return 0;
+}
+
+
+static int hid_kbd_state_key_set(uint8_t key)
+{
+    uint8_t ctrl_mask = button_ctrl_code(key);
+
+    if (ctrl_mask) {
+        hid_keyboard_state.ctrl_keys_state |= ctrl_mask;
+        return 0;
+    }
+    for (size_t i = 0; i < KEY_PRESS_MAX; ++i) {
+        if (hid_keyboard_state.keys_state[i] == 0) {
+            hid_keyboard_state.keys_state[i] = key;
+            return 0;
+        }
+    }
+    /* All slots busy */
+    return -EBUSY;
+}
+
+
+static int hid_kbd_state_key_clear(uint8_t key)
+{
+    uint8_t ctrl_mask = button_ctrl_code(key);
+
+    if (ctrl_mask) {
+        hid_keyboard_state.ctrl_keys_state &= ~ctrl_mask;
+        return 0;
+    }
+    for (size_t i = 0; i < KEY_PRESS_MAX; ++i) {
+        if (hid_keyboard_state.keys_state[i] == key) {
+            hid_keyboard_state.keys_state[i] = 0;
+            return 0;
+        }
+    }
+    /* Key not found */
+    return -EINVAL;
+}
+
+/** @brief Press a button and send report
+ *
+ *  @note Functions to manipulate hid state are not reentrant
+ *  @param keys
+ *  @param cnt
+ *
+ *  @return 0 on success or negative error code.
+ */
+static int hid_buttons_press(const uint8_t *keys, size_t cnt)
+{
+    while (cnt--) {
+        int err;
+
+        err = hid_kbd_state_key_set(*keys++);
+        if (err) {
+            LOG_ERR("Cannot set selected key.\n");
+            return err;
+        }
+    }
+
+    return key_report_send();
+}
+
+/** @brief Release the button and send report
+ *
+ *  @note Functions to manipulate hid state are not reentrant
+ *  @param keys
+ *  @param cnt
+ *
+ *  @return 0 on success or negative error code.
+ */
+static int hid_buttons_release(const uint8_t *keys, size_t cnt)
+{
+    while (cnt--) {
+        int err;
+
+        err = hid_kbd_state_key_clear(*keys++);
+        if (err) {
+            LOG_ERR("Cannot clear selected key.\n");
+            return err;
+        }
+    }
+
+    return key_report_send();
+}
+
+
+// static void button_text_changed(bool down)
+// {
+//     static const uint8_t *chr = hello_world_str;
+
+//     if (down) {
+//         hid_buttons_press(chr, 1);
+//     } else {
+//         hid_buttons_release(chr, 1);
+//         if (++chr == (hello_world_str + sizeof(hello_world_str))) {
+//             chr = hello_world_str;
+//         }
+//     }
+// }
+
+
+// static void button_shift_changed(bool down)
+// {
+//     if (down) {
+//         hid_buttons_press(shift_key, 1);
+//     } else {
+//         hid_buttons_release(shift_key, 1);
+//     }
+// }
+
+
+// static void button_changed(uint32_t button_state, uint32_t has_changed)
+// {
+//     static bool pairing_button_pressed;
+
+//     uint32_t buttons = button_state & has_changed;
+
+//     if (k_msgq_num_used_get(&mitm_queue)) {
+//         if (buttons & KEY_PAIRING_ACCEPT) {
+//             pairing_button_pressed = true;
+//             num_comp_reply(true);
+
+//             return;
+//         }
+
+//         if (buttons & KEY_PAIRING_REJECT) {
+//             pairing_button_pressed = true;
+//             num_comp_reply(false);
+
+//             return;
+//         }
+//     }
+
+//     /* Do not take any action if the pairing button is released. */
+//     if (pairing_button_pressed &&
+//         (has_changed & (KEY_PAIRING_ACCEPT | KEY_PAIRING_REJECT))) {
+//         pairing_button_pressed = false;
+
+//         return;
+//     }
+
+//     if (has_changed & KEY_TEXT_MASK) {
+//         button_text_changed((button_state & KEY_TEXT_MASK) != 0);
+//     }
+//     if (has_changed & KEY_SHIFT_MASK) {
+//         button_shift_changed((button_state & KEY_SHIFT_MASK) != 0);
+//     }
+// }
+
+
+void bas_notify(void)
+{
+    uint8_t battery_level = bt_bas_get_battery_level();
+
+    battery_level--;
+
+    if (!battery_level) {
+        battery_level = 100U;
+    }
+
+    bt_bas_set_battery_level(battery_level);
 }
