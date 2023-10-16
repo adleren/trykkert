@@ -57,7 +57,6 @@ static struct conn_mode {
     bool in_boot_mode;
 } conn_mode;
 
-/* Current report status */
 static struct keyboard_state {
     uint8_t ctrl_keys_state;
     uint8_t keys_state[KEY_PRESS_MAX];
@@ -130,7 +129,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     int err;
-    bool is_any_dev_connected = false;
 
     char addr[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
@@ -144,14 +142,6 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
     if (conn_mode.conn == conn) {
         conn_mode.conn = NULL;
-    } else {
-        if (conn_mode.conn) {
-            is_any_dev_connected = true;
-        }
-    }
-
-    if (!is_any_dev_connected) {
-        // dk_set_led_off(CON_STATUS_LED);
     }
 
     advertising_start();
@@ -178,13 +168,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 };
 
 
-// static void caps_lock_handler(const struct bt_hids_rep *rep)
-// {
-//     uint8_t report_val = ((*rep->data) & OUTPUT_REPORT_BIT_MASK_CAPS_LOCK) ? 1 : 0;
-//     dk_set_led(LED_CAPS_LOCK, report_val);
-// }
-
-
 static void hids_outp_rep_handler(struct bt_hids_rep *rep, struct bt_conn *conn, bool write)
 {
     char addr[BT_ADDR_LE_STR_LEN];
@@ -196,7 +179,6 @@ static void hids_outp_rep_handler(struct bt_hids_rep *rep, struct bt_conn *conn,
     };
 
     LOG_INF("Output report has been received %s\n", addr);
-    // caps_lock_handler(rep);
 }
 
 
@@ -211,7 +193,6 @@ static void hids_boot_kb_outp_rep_handler(struct bt_hids_rep *rep, struct bt_con
     };
 
     LOG_INF("Boot Keyboard Output report has been received %s\n", addr);
-    // caps_lock_handler(rep);
 }
 
 
@@ -319,14 +300,6 @@ void hid_init(void)
 }
 
 
-/** @brief Function process keyboard state and sends it
- *
- *  @param pstate     The state to be sent
- *  @param boot_mode  Information if boot mode protocol is selected.
- *  @param conn       Connection handler
- *
- *  @return 0 on success or negative error code.
- */
 static int key_report_con_send(const struct keyboard_state *state, bool boot_mode, struct bt_conn *conn)
 {
     int err = 0;
@@ -351,13 +324,7 @@ static int key_report_con_send(const struct keyboard_state *state, bool boot_mod
     return err;
 }
 
-/** @brief Function process and send keyboard state to all active connections
- *
- * Function process global keyboard state and send it to all connected
- * clients.
- *
- * @return 0 on success or negative error code.
- */
+
 static int key_report_send(void)
 {
     if (conn_mode.conn) {
@@ -372,16 +339,7 @@ static int key_report_send(void)
     return 0;
 }
 
-/** @brief Change key code to ctrl code mask
- *
- *  Function changes the key code to the mask in the control code
- *  field inside the raport.
- *  Returns 0 if key code is not a control key.
- *
- *  @param key Key code
- *
- *  @return Mask of the control key or 0.
- */
+
 static uint8_t button_ctrl_code(uint8_t key)
 {
     if (KEY_CTRL_CODE_MIN <= key && key <= KEY_CTRL_CODE_MAX) {
@@ -428,126 +386,27 @@ static int hid_kbd_state_key_clear(uint8_t key)
     return -EINVAL;
 }
 
-/** @brief Press a button and send report
- *
- *  @note Functions to manipulate hid state are not reentrant
- *  @param keys
- *  @param cnt
- *
- *  @return 0 on success or negative error code.
- */
-static int hid_buttons_press(const uint8_t *keys, size_t cnt)
-{
-    while (cnt--) {
-        int err;
 
-        err = hid_kbd_state_key_set(*keys++);
-        if (err) {
-            LOG_ERR("Cannot set selected key.\n");
-            return err;
-        }
+int hid_key_changed(uint8_t button_mask)
+{
+    if (button_mask & (uint8_t)(1U << 0)) {
+        hid_kbd_state_key_set(KEY_CODE_SW0);
+    } else {
+        hid_kbd_state_key_clear(KEY_CODE_SW0);
+    }
+
+    if (button_mask & (uint8_t)(1U << 1)) {
+        hid_kbd_state_key_set(KEY_CODE_SW1);
+    } else {
+        hid_kbd_state_key_clear(KEY_CODE_SW1);
     }
 
     return key_report_send();
 }
-
-/** @brief Release the button and send report
- *
- *  @note Functions to manipulate hid state are not reentrant
- *  @param keys
- *  @param cnt
- *
- *  @return 0 on success or negative error code.
- */
-static int hid_buttons_release(const uint8_t *keys, size_t cnt)
-{
-    while (cnt--) {
-        int err;
-
-        err = hid_kbd_state_key_clear(*keys++);
-        if (err) {
-            LOG_ERR("Cannot clear selected key.\n");
-            return err;
-        }
-    }
-
-    return key_report_send();
-}
-
-
-// static void button_text_changed(bool down)
-// {
-//     static const uint8_t *chr = hello_world_str;
-
-//     if (down) {
-//         hid_buttons_press(chr, 1);
-//     } else {
-//         hid_buttons_release(chr, 1);
-//         if (++chr == (hello_world_str + sizeof(hello_world_str))) {
-//             chr = hello_world_str;
-//         }
-//     }
-// }
-
-
-// static void button_shift_changed(bool down)
-// {
-//     if (down) {
-//         hid_buttons_press(shift_key, 1);
-//     } else {
-//         hid_buttons_release(shift_key, 1);
-//     }
-// }
-
-
-// static void button_changed(uint32_t button_state, uint32_t has_changed)
-// {
-//     static bool pairing_button_pressed;
-
-//     uint32_t buttons = button_state & has_changed;
-
-//     if (k_msgq_num_used_get(&mitm_queue)) {
-//         if (buttons & KEY_PAIRING_ACCEPT) {
-//             pairing_button_pressed = true;
-//             num_comp_reply(true);
-
-//             return;
-//         }
-
-//         if (buttons & KEY_PAIRING_REJECT) {
-//             pairing_button_pressed = true;
-//             num_comp_reply(false);
-
-//             return;
-//         }
-//     }
-
-//     /* Do not take any action if the pairing button is released. */
-//     if (pairing_button_pressed &&
-//         (has_changed & (KEY_PAIRING_ACCEPT | KEY_PAIRING_REJECT))) {
-//         pairing_button_pressed = false;
-
-//         return;
-//     }
-
-//     if (has_changed & KEY_TEXT_MASK) {
-//         button_text_changed((button_state & KEY_TEXT_MASK) != 0);
-//     }
-//     if (has_changed & KEY_SHIFT_MASK) {
-//         button_shift_changed((button_state & KEY_SHIFT_MASK) != 0);
-//     }
-// }
 
 
 void bas_notify(void)
 {
-    uint8_t battery_level = bt_bas_get_battery_level();
-
-    battery_level--;
-
-    if (!battery_level) {
-        battery_level = 100U;
-    }
-
-    bt_bas_set_battery_level(battery_level);
+    // TODO: battery...
+    bt_bas_set_battery_level(100);
 }
