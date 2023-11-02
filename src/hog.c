@@ -31,6 +31,8 @@ BT_HIDS_DEF(
 
 static volatile bool is_adv;
 
+static hid_connection_changed_t connection_changed_cb;
+
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(
         BT_DATA_GAP_APPEARANCE,
@@ -100,6 +102,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     if (err) {
         LOG_ERR("Failed to connect to %s (%u)\n", addr, err);
+        if (connection_changed_cb) {
+            connection_changed_cb(0);
+        }
         return;
     }
 
@@ -109,6 +114,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     if (err) {
         LOG_ERR("Failed to notify HID service about connection\n");
+        if (connection_changed_cb) {
+            connection_changed_cb(0);
+        }
         return;
     }
 
@@ -117,12 +125,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
         conn_mode.in_boot_mode = false;
     }
 
-    if (!conn_mode.conn) {
-        advertising_start();
-        return;
-    }
-
     is_adv = false;
+    if (connection_changed_cb) {
+        connection_changed_cb(1);
+    }
 }
 
 
@@ -138,13 +144,19 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     err = bt_hids_disconnected(&hids_obj, conn);
     if (err) {
         LOG_ERR("Failed to notify HID service about disconnection\n");
+        if (connection_changed_cb) {
+            connection_changed_cb(0);
+        }
     }
 
-    if (conn_mode.conn == conn) {
+    if (conn_mode.conn) {
         conn_mode.conn = NULL;
     }
 
     advertising_start();
+    if (connection_changed_cb) {
+        connection_changed_cb(0);
+    }
 }
 
 
@@ -218,9 +230,12 @@ static void hids_pm_evt_handler(enum bt_hids_pm_evt evt, struct bt_conn *conn)
 }
 
 
-void hid_init(void)
+void hid_init(hid_connection_changed_t cb)
 {
     int err;
+
+    connection_changed_cb = cb;
+
     struct bt_hids_init_param    hids_init_obj = { 0 };
     struct bt_hids_inp_rep       *hids_inp_rep;
     struct bt_hids_outp_feat_rep *hids_outp_rep;
@@ -402,11 +417,4 @@ int hid_key_changed(uint8_t button_mask)
     }
 
     return key_report_send();
-}
-
-
-void bas_notify(void)
-{
-    // TODO: battery...
-    bt_bas_set_battery_level(100);
 }

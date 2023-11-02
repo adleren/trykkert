@@ -72,10 +72,10 @@ enum {
     INPUT_REP_KEYS_IDX = 0
 };
 
-void hid_init(void);
+typedef void (*hid_connection_changed_t)(uint8_t state);
+
+void hid_init(hid_connection_changed_t cb);
 int hid_key_changed(uint8_t button_mask);
 
 void advertising_start(void);
 bool is_advertising();
-
-void bas_notify(void);

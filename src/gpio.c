@@ -75,9 +75,6 @@ static void longpress_expired(struct k_work *work)
     }
 }
 
-static K_WORK_DELAYABLE_DEFINE(debounce_work, debounce_expired);
-static K_WORK_DELAYABLE_DEFINE(longpress_work, longpress_expired);
-
 
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -119,6 +116,10 @@ int gpio_init(button_event_handler_t handler)
     if (err) {
         return err;
     }
+
+    // define work items
+    k_work_init_delayable(&debounce_work, debounce_expired);
+    k_work_init_delayable(&longpress_work, longpress_expired);
 
     // init interrupts
     err = gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_EDGE_BOTH);
