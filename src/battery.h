@@ -15,22 +15,6 @@ int battery_set_fast_charge(void);
 int battery_set_slow_charge(void);
 
 /**
- * @brief Start battery charging.
- *
- * @retval 0 if successful. Negative errno number on error.
- */
-int battery_charge_start(void);
-
-/**
- * @brief Stop battery charging.
- *
- * @retval 0 if successful. Negative errno number on error.
- *
- * @note: want to stop charging to save power during runtime (Disables LED).
- */
-int battery_charge_stop(void);
-
-/**
  * @brief Calculates the battery voltage using the ADC.
  *
  * @param[in] battery_volt Pointer where battery voltage is stored.
@@ -49,6 +33,15 @@ int battery_get_voltage(float *battery_volt);
  * @retval 0 if successful. Negative errno number on error.
  */
 int battery_get_percentage(int *battery_percentage, float battery_volt);
+
+/**
+ * @brief Gets the current charging state
+ *
+ * @param[in] charge_state  Pointer where battery charge state is stored.
+ *
+ * @retval 0 if successful. Negative errno number on error.
+ */
+int battery_get_charge_state(int *charge_state);
 
 /**
  * @brief Initialize the battery charging circuit.

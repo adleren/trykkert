@@ -97,29 +97,6 @@ int battery_set_slow_charge()
     return gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_CHARGE_SPEED, 0); // SLOW charge 50mA
 }
 
-int battery_charge_start()
-{
-    int ret = 0;
-
-    if (!is_initialized)
-    {
-        return -ECANCELED;
-    }
-    ret |= battery_enable_read();
-    ret |= gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, 1);
-    return ret;
-}
-
-int battery_charge_stop()
-{
-    if (!is_initialized)
-    {
-        return -ECANCELED;
-    }
-
-    return gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, 0);
-}
-
 int battery_get_voltage(float *battery_volt)
 {
 
@@ -187,6 +164,12 @@ int battery_get_percentage(int *battery_percentage, float battery_voltage)
     return -ESPIPE;
 }
 
+int battery_get_charge_state(int *charge_state)
+{
+    *charge_state = gpio_pin_get(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE);
+    return 0;
+}
+
 int battery_init()
 {
     int ret = 0;
@@ -212,7 +195,7 @@ int battery_init()
         return -EIO;
     }
 
-    ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, GPIO_OUTPUT | GPIO_ACTIVE_LOW);
+    ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, GPIO_INPUT | GPIO_ACTIVE_LOW);
     ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_READ_ENABLE, GPIO_OUTPUT | GPIO_ACTIVE_LOW);
     ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_CHARGE_SPEED, GPIO_OUTPUT | GPIO_ACTIVE_LOW);
 

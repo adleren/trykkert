@@ -3,10 +3,10 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/settings/settings.h>
-#include <zephyr/bluetooth/services/bas.h>
 
 #include "battery.h"
-#include "hog.h"
+#include "bas.h"
+#include "hid.h"
 #include "gpio.h"
 
 #include <zephyr/logging/log.h>
@@ -16,16 +16,23 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 /* callbacks & services */
 static struct k_work_delayable blink_work;
-static struct k_work_delayable bas_notify_work;
+static struct k_work_delayable battery_update_work;
 
 static float battery_voltage;
 static int battery_percentage;
+static int battery_charge_state;
+
+static uint8_t btn_state = 0;
 
 static void button_handler(uint8_t button_mask)
 {
     int err;
 
     LOG_INF("Btn state: %x\n", button_mask);
+    if (button_mask == btn_state) {
+        return; // ignore if state is unchanged
+    }
+    btn_state = button_mask;
 
     if (button_mask & 0b100) {
         // long press detected
@@ -60,13 +67,23 @@ static void connection_changed_handler(uint8_t state)
     }
 }
 
-static void bas_notify(struct k_work *work)
+static void battery_update(struct k_work *work)
 {
+    int err;
+
     battery_get_voltage(&battery_voltage);
     battery_get_percentage(&battery_percentage, battery_voltage);
-    bt_bas_set_battery_level(battery_percentage);
+    bas_set_battery_level(battery_percentage);
 
-    k_work_reschedule(&bas_notify_work, K_SECONDS(10));
+    battery_get_charge_state(&battery_charge_state);
+    bas_set_charge_status(battery_charge_state);
+
+    err = bas_notify();
+    if (err) {
+        LOG_ERR("bas_notify failed with rc = %d\n", err);
+    }
+
+    k_work_reschedule(&battery_update_work, K_SECONDS(10));
 }
 
 static void blink(struct k_work *work)
@@ -90,7 +107,6 @@ int main(void)
     LOG_INF("Starting Bluetooth Peripheral HIDS keyboard example\n");
 
     battery_init();
-    battery_charge_start();
 
     err = gpio_init(button_handler);
     if (err) {
@@ -111,8 +127,8 @@ int main(void)
         settings_load();
     }
 
-    k_work_init_delayable(&bas_notify_work, bas_notify);
-    k_work_schedule(&bas_notify_work, K_NO_WAIT);
+    k_work_init_delayable(&battery_update_work, battery_update);
+    k_work_schedule(&battery_update_work, K_NO_WAIT);
 
     k_work_init_delayable(&blink_work, blink);
     k_work_schedule(&blink_work, K_NO_WAIT);

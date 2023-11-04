@@ -1,4 +1,4 @@
-#include "hog.h"
+#include "hid.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/spinlock.h>
@@ -8,7 +8,6 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
-#include <zephyr/bluetooth/services/bas.h>
 #include <zephyr/bluetooth/services/dis.h>
 #include <bluetooth/services/hids.h>
 
@@ -18,7 +17,7 @@
 #include <errno.h>
 
 #include <zephyr/logging/log.h>
-#define LOG_MODULE_NAME hog
+#define LOG_MODULE_NAME hid
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 
@@ -62,6 +61,7 @@ static struct conn_mode {
 static struct keyboard_state {
     uint8_t ctrl_keys_state;
     uint8_t keys_state[KEY_PRESS_MAX];
+    uint8_t charging;
 } hid_keyboard_state;
 
 
@@ -288,6 +288,20 @@ void hid_init(hid_connection_changed_t cb)
         0xC0              /* End Collection (Application) */
     };
 
+    // // ! test
+    // 0x05, 0x85,       /* Usage Page (Battery System) */
+    // 0x09, 0x44,       /* Usage (Charging) */
+    // 0x95, 0x01,       /* Report Count (1) */
+    // 0x75, 0x07,       /* Report Size (7) */
+    // 0x81, 0x01,       /* Feature (Cnst,Var,Abs) - padding */
+    // 0x19, 0x00,       /* Usage Minimum (0) */
+    // 0x29, 0x01,       /* Usage Maximum (1) */
+    // 0x15, 0x00,       /* Logical Minimum (0) */
+    // 0x25, 0x01,       /* Logical Maximum (1) */
+    // 0x95, 0x01,       /* Report Count (1) */
+    // 0x75, 0x01,       /* Report Size (1) */
+    // 0x81, 0x02,       /* Input (Data, Variable, Absolute) */
+
     hids_init_obj.rep_map.data = report_map;
     hids_init_obj.rep_map.size = sizeof(report_map);
 
@@ -336,6 +350,7 @@ static int key_report_con_send(const struct keyboard_state *state, bool boot_mod
     } else {
         err = bt_hids_inp_rep_send(&hids_obj, conn, INPUT_REP_KEYS_IDX, data, sizeof(data), NULL);
     }
+
     return err;
 }
 
@@ -414,6 +429,18 @@ int hid_key_changed(uint8_t button_mask)
         hid_kbd_state_key_set(KEY_CODE_SW1);
     } else {
         hid_kbd_state_key_clear(KEY_CODE_SW1);
+    }
+
+    return key_report_send();
+}
+
+
+int hid_charging_changed(uint8_t charging)
+{
+    if (charging) {
+        hid_keyboard_state.charging = 0xff;
+    } else {
+        hid_keyboard_state.charging = 0;
     }
 
     return key_report_send();

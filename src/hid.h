@@ -76,6 +76,7 @@ typedef void (*hid_connection_changed_t)(uint8_t state);
 
 void hid_init(hid_connection_changed_t cb);
 int hid_key_changed(uint8_t button_mask);
+int hid_charging_changed(uint8_t charging);
 
 void advertising_start(void);
 bool is_advertising();
