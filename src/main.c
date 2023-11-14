@@ -78,6 +78,10 @@ static void battery_update(struct k_work *work)
     battery_get_charge_state(&battery_charge_state);
     bas_set_charge_status(battery_charge_state);
 
+    // if (battery_charge_state == 0) {
+    //     return; // break early if battery is not charging
+    // }
+
     err = bas_notify();
     if (err) {
         LOG_ERR("bas_notify failed with rc = %d\n", err);
